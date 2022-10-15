@@ -1,0 +1,311 @@
+`timescale 1ns / 10ps
+
+module top();
+
+parameter int WB_ADDR_WIDTH = 2;
+parameter int WB_DATA_WIDTH = 8;
+parameter int NUM_I2C_BUSSES = 1;
+parameter int I2C_ADDR_WIDTH = 7;
+parameter int I2C_DATA_WIDTH = 8;
+
+bit  clk;
+bit  rst = 1'b1;
+wire cyc;
+wire stb;
+wire we;
+tri1 ack;
+wire [WB_ADDR_WIDTH-1:0] adr;
+wire [WB_DATA_WIDTH-1:0] dat_wr_o;
+wire [WB_DATA_WIDTH-1:0] dat_rd_i;
+wire irq;
+tri [NUM_I2C_BUSSES-1:0] scl;
+tri [NUM_I2C_BUSSES-1:0] sda;
+
+// ****************************************************************************
+// Clock generator
+initial begin : clk_gen 
+   forever #5ns clk <= ~clk;
+end
+// ****************************************************************************
+// Reset generator
+initial begin : rst_gen 
+   #113ns rst = 1'b0;
+end
+// ****************************************************************************
+// Monitor Wishbone bus and display transfers in the transcript
+bit [WB_ADDR_WIDTH-1:0] addr_val;
+bit [WB_DATA_WIDTH-1:0] data_val;
+bit we_val;
+initial begin : wb_monitoring
+   @(clk);
+   forever begin
+      wb_bus.master_monitor(addr_val, data_val, we_val);
+      $display("transferred: addr - %x, data - %x, we - %x", addr_val, data_val, we_val);
+   end
+end
+
+// ****************************************************************************
+int iter = 0;
+// Monitor I2C bus and display transfers in the transcript
+bit [I2C_ADDR_WIDTH-1:0] i2c_addr;
+bit operation;
+bit [I2C_DATA_WIDTH-1:0] i2c_data[];
+initial begin
+   forever begin
+      i2c_bus.monitor(i2c_addr, operation, i2c_data);
+      if(operation == 1'b0) begin
+	 $display("I2C_BUS WRITE Transfer: addr - %x, data - %d", i2c_addr, i2c_data);
+      end
+      else begin
+	 $display("I2C_BUS READ  Transfer: addr - %x, data - %d", i2c_addr, i2c_data);
+      end
+   end
+end
+// ****************************************************************************
+// Define the flow of the simulation
+//i2c flow
+int iter2 = 0;
+bit i2c_op;
+bit [I2C_DATA_WIDTH-1:0] write_data[];
+bit [I2C_DATA_WIDTH-1:0] read_data[];
+
+bit [I2C_DATA_WIDTH-1:0] data_queue[$] =
+   {
+     100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 
+     110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+     120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+     130, 131,
+     63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52,
+     51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40,
+     39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28,
+     27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 
+     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2 , 1, 0
+   };
+
+bit transfer_complete;
+int alt_write_val = 64;
+
+initial begin : i2c_flow
+   //initialize read_data
+   read_data = new[1];
+   read_data[0] = 0;
+   //flow
+   forever begin
+      //initialize transfer complete flag
+      transfer_complete = 1'b0;
+      //capture start of transfer
+      i2c_bus.wait_for_i2c_transfer(i2c_op, write_data);
+      //if a read command
+      if(i2c_op) begin
+         //while transfer is not complete
+         while(!transfer_complete) begin
+            //get data
+            read_data[0] = data_queue.pop_front();
+            //provide the read data
+            i2c_bus.provide_read_data(read_data, transfer_complete);
+         end
+      end
+   end
+end
+
+// ****************************************************************************
+// Define the wishbone flow of the simulation
+initial begin : wb_flow
+  static logic [WB_DATA_WIDTH-1:0] data_read = 0;
+
+  // example 1
+  #500 wb_bus.master_write(0,8'b11xxxxxx);
+
+  // set I2C bus ID
+  wb_bus.master_write(1,8'h05);
+  // set bus command
+  wb_bus.master_write(2,8'bxxxxx110);
+  // wait for interrupt
+  wait(irq) wb_bus.master_read(2, data_read);
+
+
+  //*********************************************
+  // write 0-31 to the bus
+
+  // start command
+  wb_bus.master_write(2,8'bxxxxx100);
+  wait(irq) wb_bus.master_read(2, data_read);
+
+  // write command to slave 0x22
+  wb_bus.master_write(1,8'h44);
+  wb_bus.master_write(2,8'bxxxxx001);
+  wait(irq) wb_bus.master_read(2, data_read);
+
+  //write_vals
+  for(int i=0; i<32; i++) begin
+    wb_bus.master_write(1,i);
+    wb_bus.master_write(2,8'bxxxxx001);
+    wait(irq) wb_bus.master_read(2, data_read);
+  end
+
+  // write stop bit
+  wb_bus.master_write(2,8'bxxxxx101);
+  wait(irq) wb_bus.master_read(2, data_read);
+  //*********************************************
+
+
+  //*********************************************
+  //read back 100-131
+
+  // start command
+  wb_bus.master_write(2,8'bxxxxx100);
+  wait(irq) wb_bus.master_read(2, data_read);
+  
+  // read command to slave 0x22
+  wb_bus.master_write(1,8'h45);
+  
+  // write command
+  wb_bus.master_write(2,8'bxxxxx001);
+  wait(irq) wb_bus.master_read(2, data_read);
+  
+  //read values
+  for(int i=0; i<31; i++) begin
+    // read command
+    wb_bus.master_write(2, 8'bxxxxx010);
+    wait(irq) wb_bus.master_read(2, data_read);
+    wb_bus.master_read(1, data_read);
+  end
+
+  // read command
+  wb_bus.master_write(2,8'bxxxxx011);
+  wait(irq) wb_bus.master_read(2, data_read);
+  wb_bus.master_read(1, data_read);
+  
+  // write stop command
+  wb_bus.master_write(2,8'bxxxxx101);
+  wait(irq) wb_bus.master_read(2, data_read);
+
+ //*********************************************
+
+
+ //*********************************************
+  // alternating read 63-0/write 64-127 to the bus
+
+  for(int i = 0; i < 64; i++) begin
+     //write val
+     //start command
+     wb_bus.master_write(2,8'bxxxxx100);
+     wait(irq) wb_bus.master_read(2, data_read);
+
+     // write command to slave 0x22
+     wb_bus.master_write(1,8'h44);
+     wb_bus.master_write(2,8'bxxxxx001);
+     wait(irq) wb_bus.master_read(2, data_read);
+     
+     //write val
+     //$display("writing: %d", alt_write_val);
+     wb_bus.master_write(1, alt_write_val);
+     alt_write_val++;
+
+     wb_bus.master_write(2,8'bxxxxx001);
+     wait(irq) wb_bus.master_read(2, data_read);
+     
+     // write stop bit
+     wb_bus.master_write(2,8'bxxxxx101);
+     wait(irq) wb_bus.master_read(2, data_read);
+     // *********************************************
+
+
+     // *********************************************
+     //read val
+     // start command
+     wb_bus.master_write(2,8'bxxxxx100);
+     wait(irq) wb_bus.master_read(2, data_read);
+     
+     // read command to slave 0x22
+     wb_bus.master_write(1,8'h45);
+     
+     // write command
+     wb_bus.master_write(2,8'bxxxxx001);
+     wait(irq) wb_bus.master_read(2, data_read);
+     
+     // read command
+     wb_bus.master_write(2,8'bxxxxx011);
+     wait(irq) wb_bus.master_read(2, data_read);
+     wb_bus.master_read(1, data_read);
+     
+     // write stop command
+     wb_bus.master_write(2,8'bxxxxx101);
+     wait(irq) wb_bus.master_read(2, data_read);
+      //*********************************************
+  end
+// ---------------------------------------------------------------
+
+end
+// ****************************************************************************
+// Instantiate the I2C Slave Bus Functional Model
+i2c_if #(
+       .NUM_I2C_BUSSES(NUM_I2C_BUSSES),
+       .I2C_ADDR_WIDTH(I2C_ADDR_WIDTH),
+       .I2C_DATA_WIDTH(I2C_DATA_WIDTH)
+       )
+i2c_bus (
+  .clock(clk),
+  .scl(scl),
+  .sda(sda),
+  .sda_o(sda)
+);
+// ****************************************************************************
+// Instantiate the Wishbone master Bus Functional Model
+wb_if       #(
+      .ADDR_WIDTH(WB_ADDR_WIDTH),
+      .DATA_WIDTH(WB_DATA_WIDTH)
+      )
+wb_bus (
+  // System sigals
+  .clk_i(clk),
+  .rst_i(rst),
+  // Master signals
+  .cyc_o(cyc),
+  .stb_o(stb),
+  .ack_i(ack),
+  .adr_o(adr),
+  .we_o(we),
+  // Slave signals
+  .cyc_i(),
+  .stb_i(),
+  .ack_o(),
+  .adr_i(),
+  .we_i(),
+  // Shred signals
+  .dat_o(dat_wr_o),
+  .dat_i(dat_rd_i)
+  );
+
+// ****************************************************************************
+// Instantiate the DUT - I2C Multi-Bus Controller
+\work.iicmb_m_wb(str) #(.g_bus_num(NUM_I2C_BUSSES)) DUT
+  (
+    // ------------------------------------
+    // -- Wishbone signals:
+    .clk_i(clk),         // in    std_logic;                            -- Clock
+    .rst_i(rst),         // in    std_logic;                            -- Synchronous reset (active high)
+    // -------------
+    .cyc_i(cyc),         // in    std_logic;                            -- Valid bus cycle indication
+    .stb_i(stb),         // in    std_logic;                            -- Slave selection
+    .ack_o(ack),         //   out std_logic;                            -- Acknowledge output
+    .adr_i(adr),         // in    std_logic_vector(1 downto 0);         -- Low bits of Wishbone address
+    .we_i(we),           // in    std_logic;                            -- Write enable
+    .dat_i(dat_wr_o),    // in    std_logic_vector(7 downto 0);         -- Data input
+    .dat_o(dat_rd_i),    //   out std_logic_vector(7 downto 0);         -- Data output
+    // ------------------------------------
+    // ------------------------------------
+    // -- Interrupt request:
+    .irq(irq),           //   out std_logic;                            -- Interrupt request
+    // ------------------------------------
+    // ------------------------------------
+    // -- I2C interfaces:
+    .scl_i(scl),         // in    std_logic_vector(0 to g_bus_num - 1); -- I2C Clock inputs
+    .sda_i(sda),         // in    std_logic_vector(0 to g_bus_num - 1); -- I2C Data inputs
+    .scl_o(scl),         //   out std_logic_vector(0 to g_bus_num - 1); -- I2C Clock outputs
+    .sda_o(sda)          //   out std_logic_vector(0 to g_bus_num - 1)  -- I2C Data outputs
+    // ------------------------------------
+  );
+
+
+endmodule
